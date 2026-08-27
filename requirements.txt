@@ -1,0 +1,7 @@
+FastAPI
+SQLAlchemy
+asyncpg
+Alembic
+pytest
+psycopg[binary]
+python-dotenv
