@@ -5,6 +5,40 @@ Format loosely follows ADR: **Context → Decision → Consequences**.
 
 ---
 
+## 2026-08-27 — DB driver: sync `psycopg`, not `asyncpg`
+
+**Context.** `requirements.txt` originally listed both `asyncpg` and
+`psycopg[binary]`, but nothing was consistently wired: the alembic URL
+uses `postgresql+psycopg://…`, `app/db/session.py` uses `create_engine`
+(sync), `/health` is a `def` endpoint, and every test is sync. `asyncpg`
+was installed but never imported.
+
+**Decision.** Standardize on sync `psycopg` (v3). Remove `asyncpg` from
+`requirements.txt` and uninstall it from the environments.
+
+**Why.**
+- The whole stack is already sync — matching it removes the cognitive
+  overhead of maintaining two DB access styles.
+- FastAPI runs sync (`def`) endpoints in a threadpool, so sync drivers
+  don't block the event loop. Fine for a URL shortener's I/O-light
+  request pattern.
+- Alembic is naturally sync — a sync app driver keeps one URL format
+  and one connection story end-to-end.
+- `pool_pre_ping=True` on the sync engine covers the main real-world
+  concern (stale connections after DB restarts).
+
+**Consequences.**
+- Concurrency ceiling is bounded by the threadpool, not the event loop.
+  Acceptable for expected load; if we ever need >1k concurrent DB-bound
+  requests per instance, revisit with `asyncpg` + `AsyncSession`.
+- No `async def` endpoints that touch the DB — use `def` and depend on
+  `get_db()`. If we add async endpoints for non-DB work (e.g. calling
+  external APIs), that's still fine; they just can't share the session.
+- Any future switch to async is a non-trivial migration
+  (engine, sessionmaker, dependency, and every endpoint change).
+
+---
+
 ## 2026-08-27 — Base62 encoding: own module, no library
 
 **Context.** URL shortening needs a compact, URL-safe encoding of the row's
