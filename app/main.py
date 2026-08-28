@@ -4,6 +4,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
+from app.routers import urls
 
 app = FastAPI()
 
@@ -18,3 +19,6 @@ def health(db: Session = Depends(get_db)):
             detail="database unavailable",
         )
     return {"ok": True}
+
+
+app.include_router(urls.router)

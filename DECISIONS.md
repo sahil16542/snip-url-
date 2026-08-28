@@ -99,3 +99,72 @@ supports optional expiry.
 - Any future encoding change requires a migration strategy for existing
   rows (backfill or dual-read).
 - No index on `original_url` — dedup-by-URL would require adding one.
+
+---
+
+## 2026-08-28 — Redirect with 302 Found (not 301)
+
+**Context.** `GET /{code}` resolves a short code to its original URL and
+issues an HTTP redirect. The two realistic choices are `301 Moved
+Permanently` (browsers and intermediaries cache the redirect
+aggressively — often indefinitely) and `302 Found` (treated as
+non-cacheable by default, so each click round-trips to the shortener).
+`307`/`308` are the method-preserving variants and behave the same as
+`302`/`301` respectively for a GET-only lookup.
+
+**Decision.** Return **`302 Found`**.
+
+**Why — Day-4 trade-off, named explicitly.** Day 4 is when click
+analytics land. Analytics only work if every click actually hits this
+service; `301` would let browsers and CDNs short-circuit the shortener
+after the first hit, and those repeat clicks would never be observed
+or countable. `302` costs us a shortener round-trip per click (no edge
+caching, the app must stay hot and reachable) and buys us:
+- **Countable clicks** on Day 4 without changing the redirect contract.
+- **Live target changes**: editing `original_url` takes effect on the
+  next click, instead of being masked by stale browser/CDN caches for
+  users who've already seen the link.
+- **Reversible expiry**: an expired link that gets un-expired starts
+  working again immediately, rather than being cached as gone.
+
+**Consequences.**
+- Every click is a request the shortener must serve — capacity planning
+  and uptime matter more than they would with `301`.
+- No SEO / link-equity benefit that `301` would confer (irrelevant for
+  a shortener; the destination is the canonical URL).
+- If we ever decide analytics aren't worth the load, switching to `301`
+  is a one-line change — but any URLs already served as `302` won't
+  have been cached, so the cutover is clean in one direction only
+  (302 → 301 is easy; 301 → 302 is not, because the 301s are already
+  cached in the wild).
+
+---
+
+## 2026-08-28 — Expired links return 410 Gone (not 404)
+
+**Context.** `urls.expires_at` is nullable; NULL means permanent. On
+`GET /{code}`, if the row exists but `expires_at <= now()`, we have to
+choose how to signal that to the client. The two reasonable options are
+a plain `404 Not Found` (treat expired as "no such link") or a distinct
+`410 Gone` (the code existed but is intentionally no longer available).
+
+**Decision.** Return **`410 Gone`** for expired links. `404 Not Found`
+is reserved for "no row with this short_code."
+
+**Why.**
+- Truthful signal: `410` means "was here, deliberately gone" — which is
+  exactly what expiry is. Conflating it with `404` loses that info.
+- Cache/crawler friendliness: `410` tells search engines and
+  intermediary caches to drop the URL more aggressively than `404`,
+  which they may treat as transient.
+- Cheap to distinguish for callers: any client that already handles
+  `404` can add a `410` branch trivially; those that don't will still
+  fail closed (both are 4xx).
+
+**Consequences.**
+- Two distinct 4xx codes for the "can't redirect" case — clients that
+  want a single "gone-or-missing" bucket must OR them together.
+- Expired rows are still returned by the DB lookup; the endpoint bears
+  the responsibility of checking `expires_at`. A future background
+  sweep that hard-deletes expired rows would silently convert `410`s
+  into `404`s.
